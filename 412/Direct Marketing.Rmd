@@ -1,0 +1,409 @@
+---
+title: "Final Project - 412"
+author: "Andrew Sang & Jason Yi"
+date: "11/30/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# install.packages("GGally")
+# install.packages("dataMaid")
+# install.packages("pROC")
+# install.packages("h2o", type="source", repos=(c("http://h2o-release.s3.amazonaws.com/h2o/latest_stable_R")))
+# install.packages("faraway")
+# install.packages("MASS")
+# install.packages("pROC")
+# install.packages("knitr")
+# install.packages("kableExtra") 
+# install.packages("MLmetrics")
+# install.packages("PerformanceAnalytics")
+
+library(knitr)
+library(kableExtra)
+library(MLmetrics)
+library(GGally)
+library(ggplot2)
+library(dataMaid)
+library(h2o)
+library(faraway)
+library(MASS)
+library(pROC)
+library(PerformanceAnalytics)
+library(dplyr)
+```
+
+## Dataset and Background
+Dataset: https://archive.ics.uci.edu/ml/datasets/bank+marketing
+
+The data is related with direct marketing campaigns of a Portuguese banking institution. The marketing campaigns were based on phone calls. Often, more than one contact to the same client was required, in order to access if the product (bank term deposit) would be ('yes') or not ('no') subscribed.
+
+Term Deposit is like a Certificate of Deposit (CD) in the United States: https://en.wikipedia.org/wiki/Time_deposit 
+
+The data was collected from May 2008 to November 2010. This was around the time of the Financial Crisis of 2007-08 (https://en.wikipedia.org/wiki/Financial_crisis_of_2007%E2%80%9308). Around this period, there was a lot of turbulence as Lehman Brothers collapsed and ended up creating a global recession.
+
+### Data Description
+  Attribute Information:
+  
+  bank client data:
+  1 - age (numeric) 
+  2 - job : type of job (categorical: "admin.","unknown","unemployed","management","housemaid","entrepreneur","student", "blue-collar","self-employed","retired","technician","services") 
+  3 - marital : marital status (categorical: "married","divorced","single"; note: "divorced" means divorced or widowed) 
+  4 - education (categorical: "unknown","secondary","primary","tertiary") 
+  5 - default: has credit in default? (binary: "yes","no") 
+  6 - balance: average yearly balance, in euros (numeric) 
+  7 - housing: has housing loan? (binary: "yes","no") 
+  8 - loan: has personal loan? (binary: "yes","no")
+  
+  related with the last contact of the current campaign:
+  9 - contact: contact communication type (categorical: "unknown","telephone","cellular") 
+  10 - day: last contact day of the month (numeric) 
+  11 - month: last contact month of year (categorical: "jan", "feb", "mar", ..., "nov", "dec") 
+  12 - duration: last contact duration, in seconds (numeric)
+  
+  other attributes:
+  13 - campaign: number of contacts performed during this campaign and for this client (numeric, includes last contact) 
+  14 - pdays: number of days that passed by after the client was last contacted from a previous campaign (numeric, -1 means client was not previously contacted) 
+  15 - previous: number of contacts performed before this campaign and for this client (numeric) 
+  16 - poutcome: outcome of the previous marketing campaign (categorical: "unknown","other","failure","success")
+  
+  Output variable (desired target): 17 - y - has the client subscribed a term deposit? (binary: "yes","no")
+  
+  Missing Attribute Values: None
+
+```{r emplogit_function, echo=FALSE, include=FALSE}
+emplogit = function(x, y, binsize = NULL, ci = FALSE, probit = FALSE,
+                    prob = FALSE, main = NULL, xlab = "", ylab = ""){
+  # x         vector with values of the independent variable
+  # y         vector of binary responses
+  # binsize   integer value specifying bin size (optional)
+  # ci        logical value indicating whether to plot approximate
+  #           confidence intervals (not supported as of 02/08/2015)
+  # probit    logical value indicating whether to plot probits instead
+  #           of logits
+  # prob      logical value indicating whether to plot probabilities
+  #           without transforming
+  #
+  # the rest are the familiar plotting options
+
+  if (length(x) != length(y))
+    stop("x and y lengths differ")
+  if (any(y < 0 | y > 1))
+    stop("y not between 0 and 1")
+  if (length(x) < 100 & is.null(binsize))
+    stop("Less than 100 observations: specify binsize manually")
+
+  if (is.null(binsize)) binsize = min(round(length(x)/10), 50)
+
+  if (probit){
+    link = qnorm
+    if (is.null(main)) main = "Empirical probits"
+  } else {
+    link = function(x) log(x/(1-x))
+    if (is.null(main)) main = "Empirical logits"
+  }
+
+  sort = order(x)
+  x = x[sort]
+  y = y[sort]
+  a = seq(1, length(x), by=binsize)
+  b = c(a[-1] - 1, length(x))
+
+  prob = xmean = ns = rep(0, length(a)) # ns is for CIs
+  for (i in 1:length(a)){
+    range = (a[i]):(b[i])
+    prob[i] = mean(y[range])
+    xmean[i] = mean(x[range])
+    ns[i] = b[i] - a[i] + 1 # for CI 
+  }
+
+  extreme = (prob == 1 | prob == 0)
+  prob[prob == 0] = min(prob[!extreme])
+  prob[prob == 1] = max(prob[!extreme])
+
+  g = link(prob) # logits (or probits if probit == TRUE)
+
+  linear.fit = lm(g[!extreme] ~ xmean[!extreme])
+  b0 = linear.fit$coef[1]
+  b1 = linear.fit$coef[2]
+
+  loess.fit = loess(g[!extreme] ~ xmean[!extreme])
+
+    plot(xmean, g, main=main, xlab=xlab, ylab=ylab)
+    abline(b0,b1)
+    lines(loess.fit$x, loess.fit$fitted, lwd=2, lty=2)
+}
+```
+
+### Data Import
+```{r data_import} 
+path = 'data/bank/'
+bank = read.csv(paste(path,'bank-additional-full.csv',sep=''), sep=";")
+
+# duration should be removed: cheating column. From the docs: Important note: this attribute highly affects the output target (e.g., if duration=0 then y='no'). Yet, the duration is not known before a call is performed. Also, after the end of the call y is obviously known. Thus, this input should only be included for benchmark purposes and should be discarded if the intention is to have a realistic predictive model.
+bank = bank %>% dplyr::select(-'duration')
+
+bank$y = ifelse(bank$y == 'yes', 1, 0) # recode as 1/0
+
+# check for complete cases
+print(complete.cases(bank) %>% sum() == (bank %>% dim())[[1]])
+print(bank$y %>% mean())
+
+# feature change: scale was affected so recoded 999 to -1
+bank$pdays_code = ifelse(bank$pdays == 999, -1, bank$pdays)
+bank = bank %>% dplyr::select(-'pdays')
+```
+
+### Train/Test Split 
+Since each row represents a consumer, we split on rows without any further considerations (i.e. there was no need to first group by a dimension and then split). We used an 80%/20% train/test split.
+```{r data_split}
+set.seed(1234)
+train.list <- sample(1:nrow(bank), 0.8*nrow(bank), replace = F)
+bank_train <- bank[train.list,]
+bank_test <- bank[-train.list,]
+```
+
+### Random Forest to figure out important variables
+```{r h2o_test, echo=FALSE, warning=FALSE, results=FALSE}
+# set up h2o
+h2o.init(max_mem_size = "5g")
+
+# create h2oframe
+df = bank %>% as.h2o()
+df$y = as.factor(df$y)
+
+# split into train/test/valid
+splits <- h2o.splitFrame(df, c(0.6,0.2), seed=1234)
+train <- h2o.assign(splits[[1]], "train.hex")
+valid <- h2o.assign(splits[[2]], "valid.hex")
+test <- h2o.assign(splits[[3]], "test.hex") 
+
+# set up columns to be fed into random forest
+x = colnames(df)
+x = x[x != "y"]
+x = x[x != "pdays"]
+y = "y"
+
+## run our first predictive model
+rf <- h2o.randomForest(
+  training_frame = train,
+  validation_frame = valid,
+  x=x,
+  y=y,
+  ntrees = 200,
+  stopping_rounds = 2,
+  score_each_iteration = T,
+  seed = 1234)  
+
+h2o.varimp(rf)
+```
+The Random Forest that we ran on our data indicated that age, nr.employed, euribor3m, job, education were predictive of the rate at which the consumer would sign up for the term deposit banking product (y). Using a Random Forest at this stage of projects seems to be a generally good idea, as it allowed us to cut down on the number of variables that we did more extensive data exploration on.
+
+### Data Exploration
+#### age
+```{r data_exploration_age, echo=FALSE}
+# age
+bank %>% group_by(age) %>% summarise(mean(y), n())
+# ggplot(aes(x=age), data=bank) +
+#   geom_histogram(data=bank %>% filter(y==1), fill="orange", alpha=0.2) + 
+#   geom_histogram(data=bank %>% filter(y==0), fill="blue", alpha=0.2)
+ggplot(data=bank, aes(x=age, y=y)) +
+  stat_summary(fun.y="mean", geom="point") + 
+  ggtitle('Success Rate by Age')
+# younger people are way more likely to enroll in this program
+# maybe there's something where people are more likely to enroll in retirement programs vs this program
+
+# emplogit(bank$age, bank$y, main='original - age')
+# emplogit(log1p(bank$age), bank$y, main='log1p - age')
+# emplogit(sqrt(bank$age), bank$y, main='sqrt - age')
+```
+First, we look at age. When age is greater than 60 there is a higher amount of success. There is another slight age group that is less than 25. Though we cannot truly know what is driving this, one hypothesis that we came up with is that the population of 25-60 might be more comprised of people that are working. Those Portuguese working adults may have access to a retirement investment vehicle (similar to a 401k in the US). They might be contributing to this instead of keeping their money in a term deposit product. Alternatively, those working adults may have more expenses and financial responsibilities than younger adults or retired age people, and they just might not have the ability to save as much money, driving their low rates of signing up for the term deposit.
+
+#### euribor3m
+```{r echo=FALSE, results=FALSE, include=FALSE}
+bank %>% group_by(euribor3m) %>% summarise(mean(y), n())
+ggplot(aes(x=euribor3m), data=bank) +
+  geom_histogram(data=bank %>% filter(y==1), fill="orange", alpha=0.2) + 
+  geom_histogram(data=bank %>% filter(y==0), fill="blue", alpha=0.2)
+ggplot(data=bank, aes(x=euribor3m, y=y)) +
+  stat_summary(fun.y="mean", geom="point") + 
+  ggtitle('Success Rate by euribor3m')
+# younger people are way more likely to enroll in this program
+# maybe there's something where people are more likely to enroll in retirement programs vs this program
+
+emplogit(bank$euribor3m, bank$y, main='original - euribor3m')
+emplogit(log1p(bank$euribor3m), bank$y, main='log1p - euribor3m')
+emplogit(sqrt(bank$euribor3m), bank$y, main='sqrt - euribor3m')
+```
+#### job
+```{r rates by job}
+bank %>% group_by(job) %>% summarise(mean(y), cnt= n()) %>% arrange(desc(cnt))
+```
+Looking at the rates by job, we notice that retired and student have very high success rate. This variable/feature is correlated with the findings that we see in the age plot.
+
+#### campaign
+```{r explore_campaign, results=FALSE, include=FALSE}
+# last contact day of the month
+bank %>% group_by(campaign) %>% summarise(mean(y), cnt=n()) %>% arrange(desc(cnt))
+ggplot(aes(x=campaign), data=bank) +
+  geom_histogram(data=bank %>% filter(y==1), fill="orange", alpha=0.2) + 
+  geom_histogram(data=bank %>% filter(y==0), fill="blue", alpha=0.2)
+ggplot(data=bank, aes(x=campaign, y=y)) +
+  stat_summary(fun.y="mean", geom="point") + 
+  ggtitle('Success Rate by campaign')
+# younger people are way more likely to enroll in this program
+# maybe there's something where people are more likely to enroll in retirement programs vs this program
+
+emplogit(bank$campaign, bank$y, main='original - campaign')
+emplogit(log1p(bank$campaign), bank$y, main='log1p - campaign')
+emplogit(sqrt(bank$campaign), bank$y, main='sqrt - campaign')
+```
+
+#### pdays
+```{r pdays , results=FALSE, include=FALSE}
+# pdays
+bank$pdays_code %>% summary()
+bank %>% group_by(pdays_code) %>% summarise(mean(y), n())
+
+ggplot(data=bank, aes(x=pdays_code, y=y)) +
+  stat_summary(fun.y="mean", geom="point") + 
+  ggtitle('Success Rate by pdays')
+```
+
+#### poutcome
+```{r poutcome}
+bank %>% group_by(poutcome) %>% summarise(mean(y), n())
+
+ggplot(data=bank, aes(x=previous, y=y)) +
+  stat_summary(fun.y="mean", geom="point") + 
+  ggtitle('Success Rate by previous')
+
+bank %>% group_by(previous) %>% summarise(mean(y), n())
+```
+The data is structured at the consumer (not call-instance level). In addition, we have some previous history outside of this marketing campaign (aimed towards getting consumers to sign up for term deposit product). A feature that looked very good at separating the rate was the poutcome (previous outcome) variable. This variable tells us about the outcome of a previous campaign. Here, there was only 1k consumers that previously had converted for a marketing campaign, but it had a much higher success rate (65%) compared to either the failure or nonexistent groups.
+
+#### loans
+```{r loans_and_yes, echo=FALSE}
+bank_train %>%
+  count(loan, y) %>%
+  group_by(loan) %>%
+  mutate(freq = n / sum(n))
+```
+We also looked at loans. Here, it looked like if you didn't have a loan you were more likly to say yes (12% for no loan vs 6% with a loan).  This makes sense as a term deposit is basically a loan to the bank.  If you had a loan you might not have the liquidity or ability to make a term deposit.
+
+### Model Fitting and Selection
+```{r model_fit, results=FALSE}
+# everything
+fit1 = glm(y ~ ., data=bank_train, family = binomial(link = "logit")) 
+
+# probit
+fit2 = glm(y ~ ., data=bank_train, family = binomial(link = "probit")) 
+
+# Stepwise regression model
+fit3 <- stepAIC(fit1, direction = "both", 
+                      trace = FALSE)
+fit4 <- step(glm(y ~., data = bank_train, family=binomial),trace=0,steps=100)
+
+# Try a model with fewer variables
+drop_obj = drop1(fit1, test="Chisq")
+fit5<- glm(y ~ age + job + marital + education + default + housing +
+    loan + contact + month + day_of_week + campaign + # previous +
+      previous + poutcome + emp.var.rate + cons.price.idx + euribor3m + nr.employed + pdays_code,
+    data=bank_train, family = binomial(link = "logit"))
+
+# Stepwise for interaction terms too
+add_one_mdl = add1(fit1, ~.^2, test="Chisq") # job:education, age:marital look like good candidates to add
+fit8<- glm(y ~ age:marital + job:education + job + default + contact + month + day_of_week + 
+    campaign + poutcome + emp.var.rate + cons.price.idx + cons.conf.idx + 
+    euribor3m + nr.employed + pdays_code,
+    data=bank_train,
+    family = "binomial")
+summary(fit8)
+print(1-pchisq(23269-deviance(fit8), 32949-df.residual(fit8)))
+```
+
+We tried various models. Here, the candidate models that we further analyzed were: 1) logit with all variables, 2) probit with all variables, 3) logit stepwise both directions on AIC, and 4) logit with inclusion of interactions.
+
+### Model Metrics
+```{r comparison_of_4_models, warning=FALSE}
+Model_<- c(1,2,3,8)
+Formula_<- c(summary(fit1)$call,summary(fit2)$call,summary(fit3)$call,summary(fit8)$call)
+Formula_<- format(Formula_)
+
+# Metrics
+Deviance_<- c(summary.glm(fit1)$deviance,summary.glm(fit2)$deviance,summary.glm(fit3)$deviance,summary.glm(fit8)$deviance)
+AIC_<- c(AIC(fit1),AIC(fit2),AIC(fit3),AIC(fit8))
+MSE_<- c(mean(fit1$residuals^2), mean(fit2$residuals^2),mean(fit3$residuals^2),mean(fit8$residuals^2))
+PR_AUC_ = c(PRAUC(fitted(fit1), bank_train$y), PRAUC(fitted(fit2), bank_train$y), PRAUC(fitted(fit3), bank_train$y),PRAUC(fitted(fit8), bank_train$y))
+AUC_ = c(AUC(fitted(fit1), bank_train$y), AUC(fitted(fit2), bank_train$y), AUC(fitted(fit3), bank_train$y),AUC(fitted(fit8), bank_train$y))
+
+# Metrics on Test
+TEST_PR_AUC = c(PRAUC(predict(fit1, newdata=bank_test),bank_test$y),PRAUC(predict(fit2, newdata=bank_test),bank_test$y),PRAUC(predict(fit3, newdata=bank_test),bank_test$y),PRAUC(predict(fit8, newdata=bank_test),bank_test$y) )
+TEST_AUC = c(AUC(predict(fit1, newdata=bank_test),bank_test$y),AUC(predict(fit2, newdata=bank_test),bank_test$y),AUC(predict(fit3, newdata=bank_test),bank_test$y),AUC(predict(fit8, newdata=bank_test),bank_test$y) )
+
+# Set up Output Table
+together <- data.frame(Model_,Formula_,Deviance_,MSE_, AIC_,  AUC_, PR_AUC_, TEST_AUC, TEST_PR_AUC)
+kable(together, caption= "Model Summaries", digits = 2) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive")) %>%
+  row_spec(3:3, bold = T, color = "white", background = "#D7261E")
+```
+We then compared these 4 models on a variety of metrics including AIC, Deviance, PRAUC, and AUC. PR AUC tends to be a better metric when looking at an imbalanced class dataset (like our dataset). All of the models here seemed to exhibit similar performance, so we chose the model with the least number of parameters/variables. 
+
+### Model Diagnostics
+```{r}
+summary(fit3)
+pchisq(deviance(fit3), df.residual(fit3), lower.tail = FALSE)
+# interpretation odds
+round(exp(coef(fit3)) - 1,2)
+```
+We have displayed the coefficients, the output of the Chisq good fit likelihood test as well as the exponentiated coefficients subtracted by 1.
+
+The coefficients are the impact on the log odds of success. The Chisq output was 1 which means that we cannot reject the null hypothesis that this is a good fitting model, so it seems to be an adequate fit. 
+
+The exponentiated coefficients subtracted by 1 allow us to interpret the values as follows: the +0.23 for jobretired means that, holding all else equal, compared to the base (job case: admin) being job retired means that the odds of success are 23% higher. This is corroborrated by some of our initial data analysis. 
+
+Additionally, the -0.04 for campaign means that, holding all else equal, every additional unit of campaign (another call to this consumer for this campaign), results in a 4% decrease in odds of success. This intuitively makes sense as a) the campaign is likely to NOT call consumers after they have signed up for this term deposit product, and as a result, higher levels of campaign are associated with consumers that may have already said no.
+
+#### Deviance Residuals vs Binned Linear Predictor
+```{r, warning=FALSE}
+# farway example
+linpred = predict(fit3)
+bank_train = bank_train %>% mutate(residuals = residuals(fit3), linpred=predict(fit3))
+
+gdf = bank_train %>% group_by(cut(linpred, breaks=unique(quantile(linpred,(1:25)/26))))
+diagdf <- summarise(gdf, residuals=mean(residuals), linpred=mean(linpred), cnt=n())
+plot(residuals ~ linpred, diagdf, xlab="linear predictor")
+```
+Here, we are comparing the linear predictor (eta) with the deviance residuals. We have binned the linear predictors into 25 buckets in order to help with visualization, and plotted the mean linear prediction and mean residual for that bucket. In a properly fitting model, we would hope to see a similar level of residuals across the different buckets of prediction values. This does not need to be centered around 0 though. However, in this model, many of the predictions have similar residual values (-.15 to -.20). However, starting around linear predictor -1.75, the residuals start to wildy deviate from that range. It represents 5 data points so 5/25 (20% of the predictions), which is substantial, but we were not sure how to further diagnose or "fix" this issue. 
+
+#### Deviance Residuals vs Predictor Values
+```{r warning=FALSE}
+gdf <- group_by(bank_train, job)
+diagdf <- summarise(gdf, residuals=mean(residuals), cnt=n())
+ggplot(diagdf, aes(x=job,y=residuals, size=cnt)) + geom_point()
+```
+We can also bin the residuals by values of various predictor values. Again, we aren't expecting them to be centered around 0, but hope that they are of similar levels. Here, we are looking at the job variable and see that for most jobs, they hover between -.15 and .175. There are two outliers, retired and student, which is interesting as these are the jobs that were associated with higher rates.
+
+#### Leverage Analysis
+```{r}
+halfnorm(hatvalues(fit3))
+bank_train %>% filter(hatvalues(fit3) > 0.3)
+```
+Looking at the leverage plot, it seems like there were 2 datapoints that had much higher hat values than the rest of the dataset, but given that we had 40k points, we didn't exclude these from our analysis.
+
+#### Comparing Observed and Predicted Proportions
+```{r warning=FALSE}
+bank_trainm <- na.omit(bank_train)
+bank_trainm <- mutate(bank_trainm, predprob=predict(fit3,type="response"))
+gdf <- group_by(bank_trainm, cut(linpred, breaks=unique(quantile(linpred,(1:100)/101))))
+hldf <- summarise(gdf, y=sum(y), ppred=mean(predprob), count=n())
+
+hldf <- mutate(hldf, se.fit=sqrt(ppred*(1-ppred)/count))
+ggplot(hldf,aes(x=ppred,y=y/count,ymin=y/count-2*se.fit,ymax=y/count+2*se.fit))+
+  geom_point()+geom_linerange(color=grey(0.75))+
+  geom_abline(intercept=0,slope=1)+
+  xlab("Predicted Probability")+
+  ylab("Observed Proportion")
+```
+Lastly, we binned the points by the predicted probability and compared that to the observed proportion for those points. For the most part, we see that they generally follow the same line, which is good (i.e. we see that our predicted probability and the observed seem to line up). Also, this plot shows some of the class imbalance of the dataset as there are many datapoints to the left of predicted probability 0.2 which shows that we had many more points that had low probability of success.
