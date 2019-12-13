@@ -1,0 +1,189 @@
+---
+title: "Final Project for UCLA MAS 405"
+author: "Andrew Sang - 505256314"
+date: "2019-07-04"
+output: html_document
+---
+## Introduction
+For my final project in 405, I wanted to really work on a project that would let me delve into a game show that I've always been really interested in, "Jeopardy!". Growing up, I was always so impressed with the ability of the contestants to quickly recall facts from such a diverse body of areas. In contrast to most other game shows, the winner will come back for the next show. My college roommate had "Jeopardy!"" on Playstation 3 and we spent many nights buzzing in and attempting to best each other.
+
+As an aside, I also really enjoy watching sports. One of the recent developments has been a win probability output that is generate throughout the course of the game.
+
+![ESPN Win Probability](fig/espn_win_prob.png)
+
+#### Business Goal/Question
+When I'm in the middle of an episode, I often catch myself being curious about who will win. Sure, the person with the most points is the likely winner...but, how likely? 
+
+Can if I develop a proof of concept model to generate a "realtime" win probability for any standard* game of "Jeopardy!"?
+
+#### Technical Goals
+I also wanted to see if I could use a lot of the concepts in the course to manage the data used for the model. These include, web scraping, storing data in SQL, and doing manipulations in R.
+
+### Set up Workspace & Libraries
+```{r setup, include=FALSE}
+# Set Working Directory
+knitr::opts_chunk$set(echo = TRUE)
+setwd('/Users/andrewsang/Dropbox/ucla/2019_04Spring/405_datamanage/final_project')
+
+library(h2o)
+library(RMySQL)
+library(DBI)
+library(dplyr)
+library(ggplot2)
+library(dataMaid)
+library(data.table)
+library(reshape2)
+
+h2o.init(nthreads=-1, max_mem_size="2G")
+```
+
+### Scraping
+I made the decision to scrape the data in Python. I've included the ipynb converted to py script (scrape.py). The source of the data is http://www.j-archive.com/, which is a site where ardent Jeopardy users track/input the information associated with each game of jeopardy. I decided to loop through each season, each episode, and find the scores (e.g. http://www.j-archive.com/showscores.php?game_id=6344). Once I had that data, I stored it as a JSON object. Using Python, I did some manipulations to get the data at a season/episode/round/question, with the scores of the players after the question concluded as the values. I saved this data as a CSV and am reading it into R.
+
+A future enhancement would be to set up the script as a cron job so that it can pull automatically and update the CSV.
+
+### Sending Data to MySQL Database
+Next, I'd like to store this information in a MySQL database. If/when the data grows too large, we can always just pull the games of Jeopardy that do not currently exist in the database and then do an insert statement. For now, it seems like there isn't a performance issue with just pulling together all of the existing games.
+
+```{r}
+# import & quick cleanup
+pivot <- read.csv('pivot_generated_20190702095603.csv', stringsAsFactors = FALSE)
+pivot <- pivot[, colnames(pivot)!='X']
+pivot <- pivot %>% select(season, game_id, rnd, question, player0, player1, player2, player3)
+pivot %>% head(2)
+
+# write data to mysql table
+con <- dbConnect(MySQL(), user='root', password='account123', dbname='production', host='localhost', port=3306)
+dbWriteTable(con,
+             name="scores",
+             value=pivot,
+             field.types=c(season="INTEGER",
+                           game_id="INTEGER",
+                           rnd="INTEGER", 
+                           question="INTEGER",
+                           player0="INTEGER",
+                           player1="INTEGER",
+                           player2="INTEGER",
+                           player3="INTEGER"),
+             row.names=FALSE,
+             overwrite=TRUE)
+
+# can do some basic queries for fun
+dbGetQuery(con, "SELECT count(1) FROM scores")
+dbGetQuery(con, "SELECT * FROM scores LIMIT 10")
+dbGetQuery(con, "SELECT count(distinct season) as season_cnt, count(distinct game_id) as game_cnt FROM scores")
+dbGetQuery(con, "SELECT 
+                    greatest(max(player0), max(player1), max(player2), max(player3)) as max_game_score,
+                    least(min(player0), min(player1), min(player2), min(player3)) as min_game_score
+                FROM scores")
+dbDisconnect(con)
+```
+
+### R Manipulation and Data Checking
+Now, we have the data in a SQL database but we need to do some data cleaning before proceeding to any modeling.
+```{r}
+con <- dbConnect(MySQL(), user='root', password='account123', dbname='production', host='localhost', port=3306)
+scores <- dbGetQuery(con, "SELECT * FROM scores")
+scores %>% summary()
+
+#We can utilize the DataMaid package to get a quick overview
+# makeDataReport(data = scores,
+#                mode = c("summarize","visualize","check"),
+#                smartNum = FALSE, 
+#                file = "codebook_subset.Rmd",
+#                replace = TRUE, 
+#                checks = list(character = "showAllFactorLevels", 
+#                              factor = "showAllFactorLevels", 
+#                              labelled = "showAllFactorLevels", 
+#                              haven_labelled = "showAllFactorLevels", 
+#                              numeric = NULL, 
+#                              integer = NULL, 
+#                              logical = NULL, 
+#                              Date = NULL), 
+#                listChecks = FALSE, 
+#                maxProbVals = 100, 
+#                codebook = TRUE,
+#                reportTitle = "Codebook for Final Project")
+
+# look into the player3 issue
+scores %>% filter(!is.na(player3)) %>% head()
+scores %>% filter(game_id==1933)
+scores <- scores[,colnames(scores)!='player3']
+scores %>% summary()
+
+# how many games have X questions?
+scores %>% 
+  group_by(game_id) %>%
+  summarise(rnd_cnt = n_distinct(rnd), 
+            question_cnt = n_distinct(paste(rnd,question,sep='-'))) %>% 
+  ungroup() %>% 
+  group_by(question_cnt) %>% 
+  summarise(game_id_cnt = n_distinct(game_id)) %>% 
+  arrange(desc(game_id_cnt))
+# all have 3 rounds
+
+# looks like the vast majority have more than 50+ questions. Going to filter anything with less than that.
+scores <- scores %>% mutate(rnd_quest = paste(rnd,question,sep="_"))
+scores <- data.table(scores)[,c("game_question_cnt"):=list(n_distinct(rnd_quest)), by=list(game_id)]
+scores <- scores %>% filter(game_question_cnt>50)
+```
+
+#### Example of a quick model for the other piece
+```{r, results="hide"}
+# get the winner for each game
+last_q <- scores %>% filter(rnd_quest == '2_0')
+last_q$winner <- apply(last_q[,c('player0','player1','player2')],1,which.max) - 1
+last_q <- last_q %>% select(game_id, winner)
+
+scores_winner <- scores %>% left_join(last_q, by = 'game_id')
+scores_winner <- scores_winner %>% mutate(winner=as.factor(winner))
+
+# add a rank for each row number that we can parse
+scores_winner <- scores_winner %>% group_by(game_id) %>% mutate(row_num = row_number())
+
+# split 75/25 
+set.seed(1234)
+game_list <- scores_winner$game_id %>% unique() %>% sample()
+train_split <- floor(length(game_list)*.75)
+train_games <- game_list[1:train_split]
+test_games <- game_list[train_split:length(game_list)]
+
+# convert frames to h2o
+train_frame <- scores_winner %>% filter(game_id %in% train_games)
+test_frame <- scores_winner %>% filter(game_id %in% test_games)
+
+X <- colnames(train_frame)[3:length(colnames(train_frame))-1]
+y <- "winner"
+model <- h2o.glm(x = X, y = y,
+                 family = "multinomial",
+                 training_frame = as.h2o(train_frame), validation_frame = as.h2o(test_frame),
+                 seed = 1234, nfolds = 5)
+
+predict_frame <- h2o.predict(model, as.h2o(test_frame)) %>% as.data.frame()
+test_w_preds <- test_frame %>% copy() %>% as.data.frame()
+test_w_preds[, c("p0","p1","p2")] <- predict_frame[, c("p0","p1","p2")]
+```
+
+
+```{r}
+# reshape dataframe to help plotting
+graph_game_preds <- function(data, id, ...){
+  data <- data %>% filter(game_id==id) %>% select(game_id, winner, row_num, p0, p1, p2)
+  data <- melt(data, id=c("row_num","game_id","winner"))
+  win <- (data$winner %>% unique())[[1]]
+  graph <- ggplot(data) + geom_line(aes(x=row_num, y=value, colour=variable)) + 
+    ggtitle(paste('game_id is',id,'winner is',win,sep=" "))
+  return(graph)
+}
+
+graph_game_preds(test_w_preds, id=test_games %>% sample(size=1))
+```
+
+
+```{r, results="hide"}
+h2o.removeAll() ## clean slate - just in case the cluster was already running
+h2o.shutdown()
+```
+
+
+
