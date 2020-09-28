@@ -8,3 +8,4 @@ A place to store the final projects and workprod from the UCLA MAS Program.
 * 416 - Geostatistics: Spatial modeling of Lakers shot distribution using spatstats on a scaped dataset (stats.nba.com)
 * 418 - Tools in Datascience (v2019): Putting a basic model for predicting Wine Quality scores into Docker and deploying on AWS.
 * 418 - Tools in Datascience (v2020): Built a flask app that mimics the app used for Iowa caucus. Allows end users to access stored data via API.
+* Thesis: Built a deep learning model that predicts the genre of a track given a) musical features, b) lyrics, and c) cover art.
