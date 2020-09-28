@@ -32,25 +32,3 @@ Using Deep Learning to predict genre using lyrics, cover art, and musical featur
 | lyr   | 0.225    | 0.198     | 0.225  | 0.194 |
 | img   | 0.186    | 0.16      | 0.186  | 0.166 |
 | music | 0.285    | 0.278     | 0.285  | 0.255 |
-
-
-
-
-|             | With Musical Features | With Lyrics | With Cover Art | With Genre Labels | With All 4 |
-|-------------|-----------------------|-------------|----------------|-------------------|------------|
-| Track Count | 1,000,000             | 237,701     | 70,596         | 274,936           | 70,596     |
-| % of Total  | 100%                  | 23%         | 7%             | 27%               | 7%         |
-
-
-| Data Input       | Architecture   | Learning Rate Max | Epoch | Batch Size | Loss Fn        | Optimizer | Data Transform     |
-|------------------|----------------|-------------------|-------|------------|----------------|-----------|--------------------|
-| Lyrics           | Feedforward    | 1e-3              | 10    | 64         | Cross Entropy  | Adam      | Feature Selection  |
-| Cover Art        | resnet34       | 1e-3              | 5     | 64         | Cross Entropy  | Adam      | Image Augmentation |
-| Musical Features | Inception Time | 1e-3              | 5     | 128        | Cross Entropy  | Adam      | Standardization    |
-
-
-| Hidden Layers | Weight Decay | Final Train Loss | Final Validation Loss |
-|---------------|--------------|------------------|-----------------------|
-| [200, 100]    | 0.1          | 1.77             | 4.07                  |
-| [100, 50]     | 0.1          | 1.99             | 3.73                  |
-| [36, 18, 9]   | 0            | 2.28             | 2.83                  |
